@@ -257,18 +257,21 @@ canvas.addEventListener('touchstart', e => {
   touchStartX = t.clientX;
   touchStartY = t.clientY;
   if (state === 'start') startGame();
-  if (state === 'gameover' && gameOverAlpha >= 1) {
-    const rect = canvas.getBoundingClientRect();
-    const cx = (t.clientX - rect.left) * (W / rect.width);
-    const cy = (t.clientY - rect.top) * (H / rect.height);
-    if (!handleShare(null, cx, cy)) startGame();
-  }
 }, { passive: false });
 
 canvas.addEventListener('touchmove', e => { e.preventDefault(); }, { passive: false });
 
 canvas.addEventListener('touchend', e => {
   e.preventDefault();
+  if (state === 'gameover' && gameOverAlpha >= 1) {
+    const t = e.changedTouches[0];
+    const rect = canvas.getBoundingClientRect();
+    const cx = (t.clientX - rect.left) * (W / rect.width);
+    const cy = (t.clientY - rect.top) * (H / rect.height);
+    if (!handleShare(null, cx, cy)) startGame();
+    touchStartX = null;
+    return;
+  }
   if (state !== 'playing' || touchStartX === null) return;
   const t = e.changedTouches[0];
   const dx = t.clientX - touchStartX;
