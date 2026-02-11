@@ -1041,9 +1041,16 @@ function handleShare(type, cx, cy) {
   for (const btn of shareButtons) {
     if (cx >= btn.x && cx <= btn.x + btn.w && cy >= btn.y && cy <= btn.y + btn.h) {
       const text = getShareText();
-      if (navigator.share) {
-        navigator.share({ text }).catch(() => {});
-      } else {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.cssText = 'position:fixed;left:0;top:0;opacity:0;';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.setSelectionRange(0, ta.value.length);
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      } catch (_) {
         navigator.clipboard.writeText(text).catch(() => {});
       }
       btn.copied = true;
