@@ -529,7 +529,19 @@ function update(dt) {
   const rawRoadSpeed = clamp(baseSpeed + distance * 0.003, 1, maxSpeed);
   const roadSpeed = stage === 4 ? Math.min(rawRoadSpeed, 4) : rawRoadSpeed;
   speed = clamp(roadSpeed + speedBoost, 0.5, maxSpeed);
-  // Apply parking slowdown (car pulling into spot)
+  // If stuck behind a car (not accelerating), match its speed
+  if (!isAccelerating) {
+    const lw = ROAD_W / laneCount;
+    for (const ob of obstacles) {
+      if (ob.type === 'wolt') continue;
+      if (Math.abs(ob.x - player.x) < lw * 0.5) {
+        const minGap = (player.h + ob.h) * 0.5 + 25;
+        if (ob.y < player.y && player.y - ob.y < minGap + 10) {
+          speed = Math.min(speed, roadSpeed * ob.speedMult);
+        }
+      }
+    }
+  }
   const px = speed * 60 * dt;
   const roadPx = roadSpeed * 60 * dt;
 
@@ -913,16 +925,11 @@ function update(dt) {
       ob.speedMult = clamp(ob.speedMult, 1.3, 2.2);
     }
 
-    // Same-lane auto-distance
+    // ALWAYS push obstacle behind player further behind (can't be rear-ended)
     if (ob.type !== 'wolt') {
       const lw = ROAD_W / laneCount;
       if (Math.abs(ob.x - player.x) < lw * 0.5) {
         const minGap = (player.h + ob.h) * 0.5 + 25;
-        // Push obstacle ahead only when NOT accelerating (player can crash by speeding up)
-        if (!isAccelerating && ob.y > player.y - minGap && ob.y < player.y) {
-          ob.y = player.y - minGap;
-        }
-        // ALWAYS push obstacle behind player further behind (can't be rear-ended)
         if (ob.y < player.y + minGap && ob.y > player.y) {
           ob.y = player.y + minGap;
         }
