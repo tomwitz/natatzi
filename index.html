@@ -268,7 +268,7 @@ canvas.addEventListener('touchend', e => {
   // Swipe detection — horizontal for lanes, vertical for speed
   if (Math.abs(dy) > 30 && Math.abs(dy) > Math.abs(dx)) {
     // Swipe up = speed up, swipe down = slow down (brief burst)
-    if (dy < 0) { speedBoost = Math.min(5, speedBoost + 3); touchAccelTimer = 1.5; }
+    if (dy < 0) { speedBoost = Math.min(5, Math.max(1, speedBoost + 3)); touchAccelTimer = 1.5; }
     else { speedBoost = Math.max(-6, speedBoost - 3); touchAccelTimer = 0; }
   } else if (Math.abs(dx) > 25 && Math.abs(dx) > Math.abs(dy)) {
     switchLane(dx > 0 ? 1 : -1);
