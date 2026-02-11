@@ -1,0 +1,1822 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Natatzi — The Tel Aviv Driving Experience</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+  width: 100%; height: 100%;
+  overflow: hidden;
+  background: #1a1a2e;
+  touch-action: none;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+canvas {
+  display: block;
+  margin: 0 auto;
+  background: #2d2d2d;
+}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+// ─── Audio (retro 8-bit sounds via Web Audio API) ────────────────────
+let audioCtx = null;
+function initAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+}
+function playTone(freq, dur, type, vol, slide) {
+  if (!audioCtx) return;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = type || 'square';
+  osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+  if (slide) osc.frequency.linearRampToValueAtTime(slide, audioCtx.currentTime + dur);
+  gain.gain.setValueAtTime(vol || 0.12, audioCtx.currentTime);
+  gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + dur);
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  osc.start();
+  osc.stop(audioCtx.currentTime + dur);
+}
+function sfxLaneSwitch() { playTone(500, 0.06, 'square', 0.08); }
+function sfxFine() {
+  playTone(200, 0.15, 'square', 0.1);
+  setTimeout(() => playTone(150, 0.2, 'square', 0.1), 100);
+}
+function sfxWoltHit() {
+  playTone(800, 0.08, 'sawtooth', 0.1);
+  setTimeout(() => playTone(600, 0.08, 'sawtooth', 0.1), 60);
+  setTimeout(() => playTone(400, 0.15, 'triangle', 0.08), 120);
+}
+function sfxCrash() {
+  // noise burst
+  if (!audioCtx) return;
+  const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.3, audioCtx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / data.length);
+  const src = audioCtx.createBufferSource();
+  src.buffer = buf;
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
+  gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.3);
+  src.connect(gain);
+  gain.connect(audioCtx.destination);
+  src.start();
+  playTone(120, 0.4, 'sawtooth', 0.12, 40);
+}
+function sfxBusLaneSwitch() {
+  playTone(330, 0.07, 'triangle', 0.06);
+  setTimeout(() => playTone(440, 0.07, 'triangle', 0.06), 70);
+}
+function sfxSpeedUp() { playTone(400, 0.04, 'square', 0.05, 600); }
+function sfxWin() {
+  playTone(523, 0.12, 'square', 0.1);
+  setTimeout(() => playTone(659, 0.12, 'square', 0.1), 120);
+  setTimeout(() => playTone(784, 0.12, 'square', 0.1), 240);
+  setTimeout(() => playTone(1047, 0.25, 'square', 0.12), 360);
+}
+function sfxParking() {
+  playTone(300, 0.1, 'triangle', 0.08, 350);
+}
+
+// ─── Constants & Configuration ───────────────────────────────────────
+const ROAD_COLOR = '#3a3a3a';
+const CURB_COLOR = '#b0b0a0';
+const LANE_LINE_COLOR = '#ffffff';
+const BUS_LANE_COLOR = '#c8a800';
+const BUS_LANE_BG = 'rgba(200, 168, 0, 0.25)';
+const SIDEWALK_COLOR = '#7a7a72';
+const BUILDING_BG = '#5a5a55';
+const FINE_AMOUNT = 500;
+const STAGE1_DURATION = 10; // seconds
+const OBSTACLE_MIN_GAP = 250;
+
+// ─── Canvas Setup ────────────────────────────────────────────────────
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+let W, H, ROAD_W, ROAD_LEFT;
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ROAD_W = Math.min(W * 0.7, 400);
+  ROAD_LEFT = (W - ROAD_W) / 2;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ─── Game State ──────────────────────────────────────────────────────
+let state = 'start'; // start | playing | gameover
+let score = 0;
+let fines = 0;
+let speed = 3;
+let baseSpeed = 3;
+let maxSpeed = 12;
+let speedBoost = 0; // player-controlled: -2 to +3
+let distance = 0;
+let laneCount = 3;
+let busLane = 0;
+let nextBusLaneSwitch = 30;
+let busLaneWarning = false;
+let nextBusLane = -1;
+let busTransitionY = -999; // y position of the transition line on screen
+let busTransitionActive = false;
+let busTransitionSwitched = false; // true once gameplay switch happened, visual still scrolling
+let lastBusSwitchTime = 0;
+
+let constructionTransitionY = -999;
+let constructionTransitionActive = false;
+let nextConstructionLane = -1;
+let fineTimer = 0;
+let fineTexts = [];
+let obstacles = [];
+let decorations = [];
+let lastObstacleDist = 0;
+let scrollOffset = 0;
+let gameOverAlpha = 0;
+const shareButtons = [];
+let startPulse = 0;
+let shakeX = 0, shakeY = 0, shakeDur = 0;
+let explosionParticles = [];
+let lastTime = 0;
+let gameTime = 0;
+let stage = 1;
+let busLaneSwitchCount = 0;
+let woltSpawnCount = 0;
+let woltsHit = 0;
+let stage2Time = 0; // time spent in stage 2
+const STAGE2_DURATION = 15; // seconds before stage 3
+let constructionLane = -1; // -1 = no construction lane
+let nextConstructionSwitch = 0;
+let stage3Time = 0;
+const STAGE3_DURATION = 15;
+
+// Stage 4: Final Boss — Parking
+let parkedCars = [];
+let curbSegments = []; // {side, y, h, curb: 'blue'|'red'|'handicap', empty: bool}
+let parkingSpot = null; // the one empty spot to park in
+let parkingTimer = 0; // how long player has been aligned with the spot
+let parkingSlowdown = 1; // kept for reset compatibility
+let parkingWin = false;
+let parkingViolation = ''; // '', 'handicap', 'towed'
+let winAlpha = 0;
+
+// Lane transition (funnel-based)
+let laneTransitionDist = 0;
+let nextLaneCount = 3;
+let laneTransitionActive = false;
+let laneTransitionY = -999; // scroll position of the funnel line
+let prevLaneCount = 3; // lane count before transition
+
+// Player
+const player = {
+  lane: 1,
+  targetLane: 1,
+  x: 0,
+  y: 0,
+  w: 30,
+  h: 55,
+  switchProgress: 1,
+  fromX: 0,
+};
+
+// ─── Helper Functions ────────────────────────────────────────────────
+function laneX(lane) {
+  const lw = ROAD_W / laneCount;
+  return ROAD_LEFT + lw * lane + lw / 2;
+}
+
+function lerp(a, b, t) {
+  return a + (b - a) * Math.max(0, Math.min(1, t));
+}
+
+function rand(min, max) {
+  return Math.random() * (max - min) + min;
+}
+
+function randInt(min, max) {
+  return Math.floor(rand(min, max + 1));
+}
+
+function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v));
+}
+
+// ─── Input Handling ──────────────────────────────────────────────────
+const keys = {};
+let touchStartX = null;
+let touchParkDir = 0; // -1 = swiped left, 1 = swiped right, 0 = none
+let touchStartY = null;
+let inputCooldown = 0;
+
+window.addEventListener('keydown', e => {
+  keys[e.key] = true;
+  if (state === 'start') { startGame(); }
+  if (state === 'gameover' && (e.key === ' ' || e.key === 'Enter')) { startGame(); }
+  if (state === 'playing') {
+    if ((e.key === 'ArrowLeft' || e.key === 'a') && inputCooldown <= 0) { switchLane(-1); inputCooldown = 0.08; }
+    if ((e.key === 'ArrowRight' || e.key === 'd') && inputCooldown <= 0) { switchLane(1); inputCooldown = 0.08; }
+  }
+  // Always prevent default for game keys to stop page scroll
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','w','a','s','d',' ','Enter'].includes(e.key)) {
+    e.preventDefault();
+  }
+});
+window.addEventListener('keyup', e => {
+  keys[e.key] = false;
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','w','a','s','d',' ','Enter'].includes(e.key)) {
+    e.preventDefault();
+  }
+});
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const t = e.touches[0];
+  touchStartX = t.clientX;
+  touchStartY = t.clientY;
+  if (state === 'start') startGame();
+  if (state === 'gameover') {
+    const rect = canvas.getBoundingClientRect();
+    const cx = (t.clientX - rect.left) * (W / rect.width);
+    const cy = (t.clientY - rect.top) * (H / rect.height);
+    if (!handleShare(null, cx, cy)) startGame();
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', e => { e.preventDefault(); }, { passive: false });
+
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  if (state !== 'playing' || touchStartX === null) return;
+  const t = e.changedTouches[0];
+  const dx = t.clientX - touchStartX;
+  const dy = t.clientY - touchStartY;
+  // Swipe detection — horizontal for lanes, vertical for speed
+  if (Math.abs(dy) > 30 && Math.abs(dy) > Math.abs(dx)) {
+    // Swipe up = speed up, swipe down = slow down (brief burst)
+    if (dy < 0) { speedBoost = Math.min(5, speedBoost + 3); }
+    else { speedBoost = Math.max(-6, speedBoost - 3); }
+  } else if (Math.abs(dx) > 25 && Math.abs(dx) > Math.abs(dy)) {
+    switchLane(dx > 0 ? 1 : -1);
+    touchParkDir = dx > 0 ? 1 : -1;
+    setTimeout(() => { touchParkDir = 0; }, 500);
+  } else {
+    // Tap left/right half
+    const dir = t.clientX < W / 2 ? -1 : 1;
+    switchLane(dir);
+    touchParkDir = dir;
+    setTimeout(() => { touchParkDir = 0; }, 500);
+  }
+  touchStartX = null;
+}, { passive: false });
+
+canvas.addEventListener('mousedown', e => {
+  if (state === 'start') startGame();
+  if (state === 'gameover') {
+    const rect = canvas.getBoundingClientRect();
+    const cx = (e.clientX - rect.left) * (W / rect.width);
+    const cy = (e.clientY - rect.top) * (H / rect.height);
+    if (!handleShare(null, cx, cy)) startGame();
+    return;
+  }
+  if (state === 'playing') {
+    if (e.clientX < W / 2) switchLane(-1);
+    else switchLane(1);
+  }
+});
+
+function switchLane(dir) {
+  const newLane = player.targetLane + dir;
+  if (newLane < 0 || newLane >= laneCount) return;
+  player.fromX = player.x;
+  player.lane = player.targetLane;
+  player.targetLane = newLane;
+  player.switchProgress = 0;
+  sfxLaneSwitch();
+}
+
+// ─── Game Start / Reset ──────────────────────────────────────────────
+function startGame() {
+  initAudio();
+  state = 'playing';
+  score = 0;
+  fines = 0;
+  speed = baseSpeed;
+  speedBoost = 0;
+  distance = 0;
+  gameTime = 0;
+  stage = 1;
+  busLaneSwitchCount = 0;
+  woltSpawnCount = 0;
+  woltsHit = 0;
+  stage2Time = 0;
+  constructionLane = -1;
+  nextConstructionSwitch = 0;
+  stage3Time = 0;
+  parkedCars = [];
+  curbSegments = [];
+  parkingSpot = null;
+  parkingTimer = 0;
+  parkingSlowdown = 1;
+  parkingWin = false;
+  parkingViolation = '';
+  winAlpha = 0;
+  laneCount = 3;
+  busLane = 0;
+  // Stage 1: bus lane must change at least twice in 10s — first switch at ~3s
+  nextBusLaneSwitch = 30;
+  busLaneWarning = false;
+  nextBusLane = -1;
+  busTransitionY = -999;
+  busTransitionActive = false;
+  busTransitionSwitched = false;
+  lastBusSwitchTime = 0;
+  constructionTransitionY = -999;
+  constructionTransitionActive = false;
+  nextConstructionLane = -1;
+  fineTimer = 0;
+  fineTexts = [];
+  obstacles = [];
+  decorations = [];
+  lastObstacleDist = 0;
+  scrollOffset = 0;
+  gameOverAlpha = 0;
+  shakeDur = 0;
+  explosionParticles = [];
+  laneTransitionDist = 99999; // No lane transitions in stage 1
+  nextLaneCount = 3;
+  laneTransitionActive = false;
+  laneTransitionY = -999;
+  prevLaneCount = 3;
+  inputCooldown = 0;
+
+  player.lane = 1;
+  player.targetLane = 1;
+  player.x = laneX(1);
+  player.y = H * 0.72;
+  player.switchProgress = 1;
+  player.fromX = player.x;
+
+  // Seed dense initial buildings
+  for (let i = 0; i < 14; i++) {
+    decorations.push(createDecoration(-rand(0, H)));
+  }
+}
+
+// ─── Obstacles ───────────────────────────────────────────────────────
+function spawnWolt() {
+  const startSide = Math.random() < 0.5 ? -1 : 1;
+  // Ride along the sideline (edge lane)
+  const edgeLane = startSide < 0 ? 0 : laneCount - 1;
+  const edgeX = startSide < 0
+    ? ROAD_LEFT + 14
+    : ROAD_LEFT + ROAD_W - 14;
+  woltSpawnCount++;
+  return {
+    type: 'wolt',
+    lane: edgeLane,
+    x: edgeX,
+    y: H + 60, // spawn behind the player (bottom of screen)
+    w: 16,
+    h: 36,
+    speedMult: rand(1.5, 2.1), // faster than player — moves upward
+    lateralSpeed: 0, // starts straight, will cut when ahead of player
+    hasCut: false,
+    color: '#00ccbc',
+  };
+}
+
+function laneHasNearbyObstacle(lane, y, minDist) {
+  const lw = ROAD_W / laneCount;
+  const tx = laneX(lane);
+  for (const ob of obstacles) {
+    if (ob.type === 'wolt') continue;
+    if (Math.abs(ob.x - tx) < lw * 0.5 && Math.abs(ob.y - y) < minDist) return true;
+  }
+  return false;
+}
+
+function spawnObstacle(forceType) {
+  let ob;
+  const roll = Math.random();
+  // Stage 1: no Wolters — only cars and buses
+  const woltChance = stage === 1 ? 0 : 0.20;
+  const busChance = woltChance + 0.20;
+  // Rest are all cars — no cones/obstacles, just traffic
+
+  const type = forceType || (roll < woltChance ? 'wolt' : roll < busChance ? 'bus' : 'car');
+
+  if (type === 'wolt') {
+    ob = spawnWolt();
+  } else if (type === 'bus') {
+    // Don't spawn if another obstacle is near the spawn point in bus lane
+    if (laneHasNearbyObstacle(busLane, -100, 100)) return;
+    ob = {
+      type: 'bus',
+      lane: busLane,
+      x: laneX(busLane),
+      y: -100,
+      w: 34,
+      h: 80,
+      speedMult: 0.85,
+      lateralSpeed: 0,
+      color: '#2e7d32',
+    };
+  } else {
+    // Regular car — never on bus lane
+    let lane = randInt(0, laneCount - 1);
+    let attempts = 0;
+    while ((lane === busLane || laneHasNearbyObstacle(lane, -70, 90)) && attempts < 10) {
+      lane = randInt(0, laneCount - 1);
+      attempts++;
+    }
+    if (laneHasNearbyObstacle(lane, -70, 90)) return; // all lanes busy, skip spawn
+    const colors = ['#c62828', '#1565c0', '#f9a825', '#6a1b9a', '#00838f', '#d84315', '#ffffff'];
+    ob = {
+      type: 'car',
+      lane: lane,
+      x: laneX(lane),
+      y: -70,
+      w: 28,
+      h: rand(45, 60),
+      speedMult: rand(0.5, 0.85),
+      lateralSpeed: 0,
+      color: colors[randInt(0, colors.length - 1)],
+    };
+  }
+  obstacles.push(ob);
+}
+
+// ─── Decorations (palm trees, buildings) ─────────────────────────────
+function createDecoration(y) {
+  const side = Math.random() < 0.5 ? 'left' : 'right';
+  // Mostly ugly grey buildings, occasional palm tree
+  const type = Math.random() < 0.15 ? 'palm' : 'building';
+  const x = side === 'left'
+    ? ROAD_LEFT - rand(20, 70)
+    : ROAD_LEFT + ROAD_W + rand(20, 70);
+  const w = type === 'palm' ? 20 : rand(40, 80);
+  const h = type === 'palm' ? 50 : rand(70, 150);
+  // Pre-generate window pattern for buildings to avoid flicker
+  let windows = null;
+  if (type === 'building') {
+    windows = [];
+    const winGap = 10;
+    for (let wy = 8; wy < h - 8; wy += winGap) {
+      for (let wx = 6; wx < w - 6; wx += winGap) {
+        if (Math.random() > 0.3) windows.push({ wx, wy });
+      }
+    }
+  }
+  // Grey/beige hues for ugly Tel Aviv buildings
+  const hue = randInt(30, 60);
+  return { type, x, y: y || -rand(20, 60), side, w, h, hue, windows };
+}
+
+// ─── Collision Detection ─────────────────────────────────────────────
+function boxCollide(a, b) {
+  return Math.abs(a.x - b.x) < (a.w + b.w) * 0.42 &&
+         Math.abs(a.y - b.y) < (a.h + b.h) * 0.42;
+}
+
+// ─── Explosion particles ─────────────────────────────────────────────
+function spawnExplosion(x, y) {
+  for (let i = 0; i < 30; i++) {
+    const angle = rand(0, Math.PI * 2);
+    const spd = rand(1, 5);
+    explosionParticles.push({
+      x, y,
+      vx: Math.cos(angle) * spd,
+      vy: Math.sin(angle) * spd,
+      life: rand(0.5, 1.2),
+      maxLife: 1.2,
+      size: rand(2, 6),
+      color: ['#ff4444', '#ff8800', '#ffcc00', '#ffffff'][randInt(0, 3)],
+    });
+  }
+}
+
+// ─── Update ──────────────────────────────────────────────────────────
+function update(dt) {
+  if (state !== 'playing') return;
+
+  inputCooldown -= dt;
+  gameTime += dt;
+
+  // Speed: compute early so px is available for all stage code
+  const holdingSpeedUp = keys['ArrowUp'] || keys['w'];
+  const holdingSpeedDown = keys['ArrowDown'] || keys['s'];
+  if (holdingSpeedUp) speedBoost = Math.min(5, speedBoost + dt * 8);
+  else if (holdingSpeedDown) speedBoost = Math.max(-6, speedBoost - dt * 8);
+  // No auto-acceleration — speed stays where you left it
+  // Stage 4: slower street for parking
+  const rawRoadSpeed = clamp(baseSpeed + distance * 0.003, 1, maxSpeed);
+  const roadSpeed = stage === 4 ? Math.min(rawRoadSpeed, 4) : rawRoadSpeed;
+  speed = clamp(roadSpeed + speedBoost, 0.5, maxSpeed);
+  // Apply parking slowdown (car pulling into spot)
+  const px = speed * 60 * dt;
+  const roadPx = roadSpeed * 60 * dt;
+
+  // Stage transitions
+  if (stage === 1 && gameTime >= STAGE1_DURATION) {
+    stage = 2;
+    stage2Time = 0;
+    // Enable lane transitions for stage 2
+    laneTransitionDist = distance + rand(200, 500);
+  }
+  if (stage === 2) {
+    stage2Time += dt;
+    if (stage2Time >= STAGE2_DURATION) {
+      stage = 3;
+      // Activate construction lane
+      constructionLane = randInt(0, laneCount - 1);
+      // Make sure it's different from bus lane
+      let conAttempts = 0;
+      while (constructionLane === busLane && conAttempts < 20) {
+        constructionLane = randInt(0, laneCount - 1);
+        conAttempts++;
+      }
+      if (constructionLane === busLane) constructionLane = (busLane + 1) % laneCount;
+      nextConstructionSwitch = distance + rand(150, 300);
+    }
+  }
+  // Stage 3 → 4 transition
+  if (stage === 3) {
+    stage3Time += dt;
+    if (stage3Time >= STAGE3_DURATION) {
+      stage = 4;
+      laneCount = 3; // narrow street for parking
+      constructionLane = -1;
+      if (player.targetLane >= laneCount) {
+        player.targetLane = laneCount - 1;
+        player.lane = laneCount - 1;
+        player.x = laneX(player.targetLane);
+        player.switchProgress = 1;
+      }
+      if (busLane >= laneCount) busLane = laneCount - 1;
+      // Seed initial parked cars and curb segments on both sides
+      const carColors = ['#c62828','#1565c0','#f9a825','#6a1b9a','#00838f','#d84315','#888'];
+      for (const side of ['left', 'right']) {
+        let py = -H;
+        let lastEmpty = false;
+        while (py < H + 100) {
+          let roll = Math.random();
+          // Never two empty spots in a row
+          if (lastEmpty) roll = Math.max(roll, 0.17);
+          const spotSize = Math.random() < 0.5 ? 30 : 70;
+          if (roll < 0.03) {
+            curbSegments.push({ side, y: py, h: spotSize, curb: 'blue', empty: true });
+            py += spotSize;
+            lastEmpty = true;
+          } else if (roll < 0.13) {
+            curbSegments.push({ side, y: py, h: spotSize, curb: 'red', empty: true });
+            py += spotSize;
+            lastEmpty = true;
+          } else if (roll < 0.17) {
+            curbSegments.push({ side, y: py, h: 70, curb: 'handicap', empty: true });
+            py += 70;
+            lastEmpty = true;
+          } else {
+            const carH = rand(50, 60);
+            curbSegments.push({ side, y: py, h: carH, curb: 'blue', empty: false,
+              carColor: carColors[randInt(0, carColors.length - 1)] });
+            py += carH + rand(3, 8);
+            lastEmpty = false;
+          }
+        }
+      }
+    }
+  }
+
+  // Stage 4: parking mechanics
+  if (stage === 4) {
+    const carColors = ['#c62828','#1565c0','#f9a825','#6a1b9a','#00838f','#d84315','#888'];
+    // Scroll curb segments & replenish
+    for (let i = curbSegments.length - 1; i >= 0; i--) {
+      curbSegments[i].y += px;
+      if (curbSegments[i].y > H + 150) {
+        // Find the topmost segment on the same side to stack above it
+        const side = curbSegments[i].side;
+        let topY = 0;
+        for (let j = 0; j < curbSegments.length; j++) {
+          if (j === i) continue;
+          if (curbSegments[j].side === side && curbSegments[j].y < topY) {
+            topY = curbSegments[j].y;
+          }
+        }
+        // Check if the current topmost segment on this side is empty
+        let topIsEmpty = false;
+        for (let j = 0; j < curbSegments.length; j++) {
+          if (j === i || curbSegments[j].side !== side) continue;
+          if (Math.abs(curbSegments[j].y - topY) < 5) {
+            topIsEmpty = curbSegments[j].empty;
+            break;
+          }
+        }
+        let roll = Math.random();
+        // Never two empty spots in a row
+        if (topIsEmpty) roll = Math.max(roll, 0.17);
+        const spotSize = Math.random() < 0.5 ? 30 : 70;
+        let newH, gap;
+        if (roll < 0.03) {
+          newH = spotSize;
+          gap = 0;
+          curbSegments[i].curb = 'blue';
+          curbSegments[i].empty = true;
+          delete curbSegments[i].carColor;
+        } else if (roll < 0.13) {
+          newH = spotSize;
+          gap = 0;
+          curbSegments[i].curb = 'red';
+          curbSegments[i].empty = true;
+          delete curbSegments[i].carColor;
+        } else if (roll < 0.17) {
+          newH = 70;
+          gap = 0;
+          curbSegments[i].curb = 'handicap';
+          curbSegments[i].empty = true;
+          delete curbSegments[i].carColor;
+        } else {
+          newH = rand(50, 60);
+          gap = rand(3, 8);
+          curbSegments[i].curb = 'blue';
+          curbSegments[i].empty = false;
+          curbSegments[i].carColor = carColors[randInt(0, carColors.length - 1)];
+        }
+        curbSegments[i].y = topY - newH - gap;
+        curbSegments[i].h = newH;
+      }
+    }
+    // Check ALL 70px empty spots — park in whichever one the player is next to
+    const pressingLeft = keys['ArrowLeft'] || keys['a'] || touchParkDir === -1;
+    const pressingRight = keys['ArrowRight'] || keys['d'] || touchParkDir === 1;
+    const slowEnough = speed <= 0.5;
+
+    // If already parking, keep going with current spot
+    if (parkingSpot && parkingTimer > 0.1) {
+      const seg = parkingSpot.seg;
+      parkingSpot.y = seg.y + seg.h / 2;
+      if (seg.y > H + 100 || !seg.empty) {
+        parkingSpot = null;
+        parkingTimer = 0;
+      }
+    } else {
+      // Find the spot the player is actually next to
+      parkingSpot = null;
+      for (const seg of curbSegments) {
+        if (!seg.empty || seg.h < 70) continue;
+        const spotY = seg.y + seg.h / 2;
+        if (Math.abs(player.y - spotY) > 120) continue;
+        const isLeft = seg.side === 'left';
+        const inEdgeLane = isLeft ? player.targetLane === 0 : player.targetLane === laneCount - 1;
+        const pressing = isLeft ? pressingLeft : pressingRight;
+        if (inEdgeLane && pressing && slowEnough) {
+          parkingSpot = { side: seg.side, y: spotY, w: 34, h: seg.h, seg };
+          break;
+        }
+      }
+      if (!parkingSpot) parkingTimer = Math.max(0, parkingTimer - dt * 3);
+    }
+
+    if (parkingSpot) {
+      parkingTimer += dt;
+      const t = Math.min(1, parkingTimer / 2);
+      const spotX = parkingSpot.side === 'left'
+        ? ROAD_LEFT + 18
+        : ROAD_LEFT + ROAD_W - 18;
+      player.x = lerp(laneX(player.targetLane), spotX, t);
+      player.y = parkingSpot.y;
+      if (parkingTimer >= 2) {
+        parkingWin = true;
+        const curbType = parkingSpot.seg.curb;
+        if (curbType === 'handicap') {
+          parkingViolation = 'handicap';
+          fines += 1000;
+        } else if (curbType === 'red') {
+          parkingViolation = 'towed';
+          fines += 1000;
+        }
+        state = 'gameover';
+        sfxWin();
+        winAlpha = 0;
+      }
+    }
+  }
+
+  // Stage 3+: manage construction lane switches (scroll-based)
+  if (stage >= 3 && distance > nextConstructionSwitch && !constructionTransitionActive) {
+    constructionTransitionActive = true;
+    constructionTransitionY = -20;
+    nextConstructionLane = randInt(0, laneCount - 1);
+    let att = 0;
+    while ((nextConstructionLane === busLane || nextConstructionLane === constructionLane) && att < 20) {
+      nextConstructionLane = randInt(0, laneCount - 1);
+      att++;
+    }
+  }
+  if (constructionTransitionActive) {
+    constructionTransitionY += px;
+    if (constructionTransitionY > player.y + 40) {
+      constructionLane = nextConstructionLane;
+    }
+    if (constructionTransitionY > H + 60) {
+      constructionTransitionActive = false;
+      constructionTransitionY = -999;
+      nextConstructionLane = -1;
+      nextConstructionSwitch = distance + rand(120, 250);
+    }
+  }
+  // Clamp construction lane after lane count changes
+  if (constructionLane >= laneCount) constructionLane = laneCount - 1;
+  if (constructionLane === busLane && laneCount > 2) {
+    constructionLane = (busLane + 1) % laneCount;
+  }
+
+  // (speed computed earlier, before stage 4 code that needs px)
+
+  distance += speed * dt * 3;
+  score = Math.floor(distance);
+  scrollOffset = (scrollOffset + px) % 2400; // road scrolls with player speed (large wrap to avoid sawtooth)
+
+  // Skip position resets during parking animation
+  if (!(stage === 4 && parkingTimer > 0.1 && parkingSpot)) {
+    player.y = H * 0.72;
+
+    // ── Player lane switching ──
+    if (player.switchProgress < 1) {
+      player.switchProgress = Math.min(1, player.switchProgress + dt * 8);
+      const targetX = laneX(player.targetLane);
+      player.x = lerp(player.fromX, targetX, player.switchProgress);
+      if (player.switchProgress >= 1) player.lane = player.targetLane;
+    } else {
+      player.x = laneX(player.targetLane);
+    }
+  }
+
+  // ── Bus lane switching (scroll-based transition) ──
+  // Stage 1: time-based (every 2 seconds). Stage 2+: distance-based.
+  const busLaneDue = stage === 1
+    ? (gameTime - lastBusSwitchTime >= 2)
+    : (distance > nextBusLaneSwitch);
+  if (busLaneDue && !busTransitionActive) {
+    busTransitionActive = true;
+    busTransitionSwitched = false;
+    busTransitionY = -20; // starts at top of screen (road ahead)
+    nextBusLane = busLane;
+    let attempts = 0;
+    while (nextBusLane === busLane && attempts < 20) {
+      nextBusLane = randInt(0, laneCount - 1);
+      attempts++;
+    }
+  }
+  // Scroll the transition line downward as player drives
+  if (busTransitionActive) {
+    busTransitionY += px;
+    // Gameplay switch: when line passes the player, change the active bus lane
+    if (!busTransitionSwitched && busTransitionY > player.y + 40) {
+      busLane = nextBusLane >= 0 ? nextBusLane : busLane;
+      busLaneSwitchCount++;
+      sfxBusLaneSwitch();
+      busTransitionSwitched = true;
+    }
+    // Visual completion: keep drawing split zones until line is off screen
+    if (busTransitionY > H + 60) {
+      busTransitionActive = false;
+      busTransitionY = -999;
+      nextBusLane = -1;
+      lastBusSwitchTime = gameTime;
+      nextBusLaneSwitch = distance + rand(100, 180);
+    }
+  }
+
+  // ── Lane count transitions (stages 2-3) — funnel-based ──
+  if (stage >= 2 && stage <= 3 && distance > laneTransitionDist && !laneTransitionActive) {
+    const options = [2, 3, 4];
+    nextLaneCount = options[randInt(0, options.length - 1)];
+    if (nextLaneCount === laneCount) nextLaneCount = laneCount < 4 ? laneCount + 1 : 2;
+    laneTransitionActive = true;
+    laneTransitionY = -20; // start at top of screen
+    prevLaneCount = laneCount;
+  }
+  if (laneTransitionActive) {
+    laneTransitionY += px;
+    if (laneTransitionY > player.y + 40) {
+      // Transition passed the player — apply new lane count
+      laneCount = nextLaneCount;
+      prevLaneCount = laneCount;
+      if (player.targetLane >= laneCount) {
+        player.targetLane = laneCount - 1;
+        player.lane = laneCount - 1;
+        player.x = laneX(player.targetLane);
+        player.switchProgress = 1;
+      }
+      if (busLane >= laneCount) busLane = laneCount - 1;
+      laneTransitionActive = false;
+      laneTransitionY = -999;
+      laneTransitionDist = distance + rand(300, 700);
+    }
+  }
+
+  // ── Fine system ──
+  const currentLane = player.switchProgress >= 1 ? player.targetLane : player.lane;
+  // Which bus lane applies at the player's position?
+  const effectiveBusLane = (busTransitionActive && player.y < busTransitionY)
+    ? (nextBusLane >= 0 ? nextBusLane : busLane) : busLane;
+  if (currentLane === effectiveBusLane) {
+    fineTimer += dt;
+    if (fineTimer >= 0.8) {
+      fines += FINE_AMOUNT;
+      sfxFine();
+      fineTexts.push({
+        x: player.x,
+        y: player.y - 30,
+        alpha: 1.5,
+        text: `-₪${FINE_AMOUNT}`,
+      });
+      fineTimer = 0;
+    }
+  } else {
+    fineTimer = Math.max(0, fineTimer - dt * 2);
+  }
+
+  // Update fine texts
+  for (let i = fineTexts.length - 1; i >= 0; i--) {
+    fineTexts[i].y -= 40 * dt;
+    fineTexts[i].alpha -= dt * 0.8;
+    if (fineTexts[i].alpha <= 0) fineTexts.splice(i, 1);
+  }
+
+  // ── Obstacles ──
+  const baseGap = stage === 1 ? 160 : OBSTACLE_MIN_GAP;
+  const spawnGap = Math.max(80, baseGap - distance * 0.01);
+  if (distance - lastObstacleDist > spawnGap / speed) {
+    spawnObstacle();
+    lastObstacleDist = distance;
+  }
+
+  // Stage 2+: keep Wolt riders coming regularly
+  if (stage >= 2) {
+    const activeWolts = obstacles.filter(o => o.type === 'wolt').length;
+    const minWolts = stage >= 3 ? 8 : 5;
+    if (activeWolts < minWolts && Math.random() < 0.10) {
+      spawnObstacle('wolt');
+    }
+  }
+
+
+  for (let i = obstacles.length - 1; i >= 0; i--) {
+    const ob = obstacles[i];
+
+    // Obstacle moves relative to player: player scrolls at px, obstacle at roadPx * speedMult
+    ob.y += px - roadPx * ob.speedMult;
+
+    // Wolt rider: ride sideline, then cut into player's path when slightly ahead
+    if (ob.type === 'wolt') {
+      if (!ob.hasCut) {
+        // Cut when the rider is 20-120px ahead of the player
+        const aheadBy = player.y - ob.y;
+        if (aheadBy > 20 && aheadBy < 120) {
+          // Cut toward the player's x position
+          const dir = player.x > ob.x ? 1 : -1;
+          ob.lateralSpeed = rand(4, 7) * dir;
+          ob.hasCut = true;
+          ob.cutCount = (ob.cutCount || 0) + 1;
+        }
+      }
+      // Some riders do a second cut — swerve back the other way
+      if (ob.hasCut && ob.cutCount === 1 && Math.random() < 0.003) {
+        ob.lateralSpeed = -ob.lateralSpeed * rand(0.6, 1.2);
+        ob.cutCount = 2;
+      }
+      if (ob.lateralSpeed) {
+        ob.x += ob.lateralSpeed * 60 * dt;
+      }
+      // Stochastic wobble — Wolt riders swerve unpredictably
+      ob.x += (Math.random() - 0.5) * 4;
+      ob.speedMult += (Math.random() - 0.5) * 0.03;
+      ob.speedMult = clamp(ob.speedMult, 1.3, 2.2);
+    }
+
+    // Same-lane auto-distance: keep cars from crashing into player
+    if (ob.type !== 'wolt' && !holdingSpeedUp) {
+      const lw = ROAD_W / laneCount;
+      if (Math.abs(ob.x - player.x) < lw * 0.5) {
+        const minGap = (player.h + ob.h) * 0.5 + 25;
+        // Push obstacle ahead of player further ahead
+        if (ob.y > player.y - minGap && ob.y < player.y) {
+          ob.y = player.y - minGap;
+        }
+        // Push obstacle behind player further behind
+        if (ob.y < player.y + minGap && ob.y > player.y) {
+          ob.y = player.y + minGap;
+        }
+      }
+    }
+
+    // Obstacle-to-obstacle spacing: prevent cars from overlapping each other
+    // Push the LEADING car forward so chains stack away from the player
+    if (ob.type !== 'wolt') {
+      const lw = ROAD_W / laneCount;
+      for (let j = 0; j < obstacles.length; j++) {
+        if (j === i) continue;
+        const other = obstacles[j];
+        if (other.type === 'wolt') continue;
+        if (Math.abs(ob.x - other.x) < lw * 0.5) {
+          const minGap = (ob.h + other.h) * 0.5 + 20;
+          // If other is ahead of ob (other.y < ob.y) and too close, push other further ahead
+          if (other.y < ob.y && ob.y - other.y < minGap) {
+            other.y = ob.y - minGap;
+          }
+        }
+      }
+    }
+
+    // Remove if off screen (top or bottom)
+    if (ob.y > H + 100 || ob.y < -200) {
+      obstacles.splice(i, 1);
+      continue;
+    }
+    // Collision
+    if (ob.y > 0 && boxCollide(player, ob)) {
+      if (stage >= 2 && ob.type === 'wolt') {
+        // Don't die — show "someone will stay hungry" message
+        woltsHit++;
+        sfxWoltHit();
+        fineTexts.push({
+          x: ob.x,
+          y: ob.y - 20,
+          alpha: 2.5,
+          text: 'someone will stay hungry 💙',
+          color: '#00ccbc',
+          big: true,
+        });
+        spawnExplosion(ob.x, ob.y);
+        shakeDur = 0.15;
+        obstacles.splice(i, 1);
+        continue;
+      }
+      gameOver();
+      spawnExplosion(player.x, player.y);
+      return;
+    }
+  }
+
+  // ── Decorations ──
+  for (let i = decorations.length - 1; i >= 0; i--) {
+    decorations[i].y += px;
+    if (decorations[i].y > H + 150) {
+      decorations.splice(i, 1);
+    }
+  }
+  if (decorations.length < 18 && Math.random() < 0.06) {
+    decorations.push(createDecoration());
+  }
+
+  // ── Screen shake ──
+  if (shakeDur > 0) {
+    shakeDur -= dt;
+    shakeX = rand(-3, 3);
+    shakeY = rand(-3, 3);
+  } else {
+    shakeX = shakeY = 0;
+  }
+}
+
+function gameOver() {
+  state = 'gameover';
+  gameOverAlpha = 0;
+  shakeDur = 0.3;
+  sfxCrash();
+}
+
+function getShareText() {
+  let text = `I survived ${score}m in Tel Aviv traffic!`;
+  if (parkingWin) {
+    if (parkingViolation === 'towed') text += ` Then got towed.`;
+    else if (parkingViolation === 'handicap') text += ` Parked on handicap.`;
+    else text += ` Even found parking.`;
+  }
+  if (fines > 0) text += ` Tel Aviv is ₪${fines} richer.`;
+  if (woltsHit > 0) text += ` ${woltsHit} Wolt rider${woltsHit > 1 ? 's' : ''} harmed.`;
+  text += `\nPlay NATATZI — The Tel Aviv Driving Experience 🚗\nhttps://tomwitz.github.io/natatzi`;
+  return text;
+}
+
+function handleShare(type, cx, cy) {
+  for (const btn of shareButtons) {
+    if (cx >= btn.x && cx <= btn.x + btn.w && cy >= btn.y && cy <= btn.y + btn.h) {
+      navigator.clipboard.writeText(getShareText()).catch(() => {});
+      btn.copied = true;
+      setTimeout(() => { btn.copied = false; }, 4000);
+      return true;
+    }
+  }
+  return false;
+}
+
+// ─── Drawing ─────────────────────────────────────────────────────────
+
+function drawRoad() {
+  // Background — grey sidewalk/urban
+  ctx.fillStyle = SIDEWALK_COLOR;
+  ctx.fillRect(0, 0, W, H);
+  // Dirty sidewalk texture
+  ctx.fillStyle = '#6e6e66';
+  for (let sy = -20 + (scrollOffset % 60); sy < H + 20; sy += 60) {
+    ctx.fillRect(0, sy, ROAD_LEFT - 10, 1);
+    ctx.fillRect(ROAD_LEFT + ROAD_W + 10, sy, W, 1);
+  }
+
+  // Road surface
+  ctx.fillStyle = ROAD_COLOR;
+  ctx.fillRect(ROAD_LEFT - 6, 0, ROAD_W + 12, H);
+
+  // Curbs
+  ctx.fillStyle = CURB_COLOR;
+  ctx.fillRect(ROAD_LEFT - 8, 0, 4, H);
+  ctx.fillRect(ROAD_LEFT + ROAD_W + 4, 0, 4, H);
+
+  // Curb stripes
+  ctx.strokeStyle = '#888';
+  ctx.lineWidth = 2;
+  for (let y = -40 + (scrollOffset % 20); y < H + 20; y += 20) {
+    ctx.beginPath();
+    ctx.moveTo(ROAD_LEFT - 8, y);
+    ctx.lineTo(ROAD_LEFT - 4, y + 10);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(ROAD_LEFT + ROAD_W + 4, y);
+    ctx.lineTo(ROAD_LEFT + ROAD_W + 8, y + 10);
+    ctx.stroke();
+  }
+
+  const lw = ROAD_W / laneCount;
+
+  // ── Draw lane markings ──
+  function drawLaneMarkings(bl, cl, yFrom, yTo, lanes) {
+    const nlw = ROAD_W / lanes;
+    // Bus lane rhombuses only (no background fill)
+    if (bl >= 0 && bl < lanes) {
+      const bx = ROAD_LEFT + nlw * bl;
+      ctx.fillStyle = BUS_LANE_COLOR;
+      ctx.globalAlpha = 0.5;
+      for (let ry = -60 + scrollOffset % 80; ry < H + 40; ry += 80) {
+        if (ry < yFrom - 20 || ry > yTo + 20) continue;
+        const rcx = bx + nlw / 2;
+        ctx.beginPath();
+        ctx.moveTo(rcx, ry - 14);
+        ctx.lineTo(rcx + 9, ry);
+        ctx.lineTo(rcx, ry + 14);
+        ctx.lineTo(rcx - 9, ry);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // Lane dividers
+    const dashOffset = -scrollOffset;
+    for (let i = 1; i < lanes; i++) {
+      const lx = ROAD_LEFT + nlw * i;
+      const left = i - 1, right = i;
+      const isBusBorder = (left === bl || right === bl);
+      const isConBorder = stage >= 3 && cl >= 0 && (left === cl || right === cl);
+
+      if (isBusBorder) {
+        ctx.strokeStyle = BUS_LANE_COLOR;
+        ctx.lineWidth = 2;
+        ctx.setLineDash([18, 14]);
+        ctx.lineDashOffset = dashOffset;
+        ctx.beginPath();
+        ctx.moveTo(lx - 3, yFrom);
+        ctx.lineTo(lx - 3, yTo);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(lx + 3, yFrom);
+        ctx.lineTo(lx + 3, yTo);
+        ctx.stroke();
+      } else if (isConBorder) {
+        ctx.strokeStyle = '#dd7711';
+        ctx.lineWidth = 2.5;
+        ctx.setLineDash([18, 14]);
+        ctx.lineDashOffset = dashOffset;
+        ctx.beginPath();
+        ctx.moveTo(lx, yFrom);
+        ctx.lineTo(lx, yTo);
+        ctx.stroke();
+      } else {
+        ctx.strokeStyle = LANE_LINE_COLOR;
+        ctx.lineWidth = 2;
+        ctx.setLineDash([18, 14]);
+        ctx.lineDashOffset = dashOffset;
+        ctx.beginPath();
+        ctx.moveTo(lx, yFrom);
+        ctx.lineTo(lx, yTo);
+        ctx.stroke();
+      }
+    }
+    ctx.setLineDash([]);
+  }
+
+  // ── Lane count transition state ──
+  const hasLaneTrans = laneTransitionActive && laneTransitionY > -20 && laneTransitionY < H + 40;
+
+  // Draw lane markings — split zones for transitions
+  const hasBusTrans = busTransitionActive && busTransitionY > -20 && busTransitionY < H + 40;
+  const hasConTrans = constructionTransitionActive && constructionTransitionY > -20 && constructionTransitionY < H + 40;
+  // Combine all active transition Y positions
+  const transY = hasLaneTrans ? laneTransitionY : (hasBusTrans ? busTransitionY : (hasConTrans ? constructionTransitionY : -999));
+  if (transY > -20 && transY < H + 40) {
+    // Above transition line = new layout
+    const newBL = hasBusTrans && nextBusLane >= 0 ? nextBusLane : busLane;
+    const newCL = hasConTrans && nextConstructionLane >= 0 ? nextConstructionLane : constructionLane;
+    const topLanes = hasLaneTrans ? nextLaneCount : laneCount;
+    const botLanes = hasLaneTrans ? prevLaneCount : laneCount;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(ROAD_LEFT - 10, 0, ROAD_W + 20, transY);
+    ctx.clip();
+    drawLaneMarkings(newBL, newCL, 0, H, topLanes);
+    ctx.restore();
+    // Below transition line = current lane
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(ROAD_LEFT - 10, transY, ROAD_W + 20, H - transY);
+    ctx.clip();
+    drawLaneMarkings(busLane, constructionLane, 0, H, botLanes);
+    ctx.restore();
+    // Draw funnel lines connecting the two lane widths
+    if (hasLaneTrans && topLanes !== botLanes) {
+      const fH = 60; // funnel height
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([]);
+      // Draw diagonal connecting lines for each lane divider
+      const topN = topLanes, botN = botLanes;
+      // Connect matching lane dividers with diagonal lines
+      const maxN = Math.max(topN, botN);
+      for (let i = 1; i < maxN; i++) {
+        const topX = i < topN ? ROAD_LEFT + (ROAD_W / topN) * i : -999;
+        const botX = i < botN ? ROAD_LEFT + (ROAD_W / botN) * i : -999;
+        if (topX > 0 && botX > 0) {
+          ctx.beginPath();
+          ctx.moveTo(topX, transY - fH);
+          ctx.lineTo(botX, transY);
+          ctx.stroke();
+        } else if (topX > 0) {
+          // Lane divider exists above but not below — fade into edge
+          const edge = topX < W / 2 ? ROAD_LEFT : ROAD_LEFT + ROAD_W;
+          ctx.beginPath();
+          ctx.moveTo(topX, transY - fH);
+          ctx.lineTo(edge, transY);
+          ctx.stroke();
+        } else if (botX > 0) {
+          // Lane divider exists below but not above — emerge from edge
+          const edge = botX < W / 2 ? ROAD_LEFT : ROAD_LEFT + ROAD_W;
+          ctx.beginPath();
+          ctx.moveTo(edge, transY - fH);
+          ctx.lineTo(botX, transY);
+          ctx.stroke();
+        }
+      }
+    }
+  } else {
+    drawLaneMarkings(busLane, constructionLane, 0, H, laneCount);
+  }
+
+  // Road edge lines (solid)
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(ROAD_LEFT, 0);
+  ctx.lineTo(ROAD_LEFT, H);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(ROAD_LEFT + ROAD_W, 0);
+  ctx.lineTo(ROAD_LEFT + ROAD_W, H);
+  ctx.stroke();
+}
+
+function drawDecorations() {
+  for (const d of decorations) {
+    if (d.type === 'palm') {
+      drawPalmTree(d.x, d.y);
+    } else {
+      drawBuilding(d);
+    }
+  }
+}
+
+function drawPalmTree(x, y) {
+  // Trunk
+  ctx.fillStyle = '#8d6e4a';
+  ctx.fillRect(x - 3, y, 6, 35);
+  // Leaves
+  ctx.fillStyle = '#3e8c3e';
+  for (let i = 0; i < 5; i++) {
+    const angle = (i / 5) * Math.PI * 2 + 0.3;
+    ctx.beginPath();
+    ctx.ellipse(x + Math.cos(angle) * 12, y - 5 + Math.sin(angle) * 8, 14, 5, angle, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // Coconuts
+  ctx.fillStyle = '#6d4c2a';
+  ctx.beginPath();
+  ctx.arc(x - 2, y + 2, 3, 0, Math.PI * 2);
+  ctx.arc(x + 3, y + 1, 3, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawBuilding(d) {
+  const { x, y, w, h, hue, windows } = d;
+  // Ugly grey-beige Tel Aviv buildings
+  ctx.fillStyle = `hsl(${hue}, 8%, 42%)`;
+  ctx.fillRect(x - w / 2, y, w, h);
+  // Darker roof edge
+  ctx.fillStyle = `hsl(${hue}, 5%, 35%)`;
+  ctx.fillRect(x - w / 2, y, w, 5);
+  // Windows (pre-generated pattern)
+  if (windows) {
+    ctx.fillStyle = `hsl(45, 40%, 65%)`;
+    for (const win of windows) {
+      ctx.fillRect(x - w / 2 + win.wx, y + win.wy, 4, 4);
+    }
+  }
+  // Stains / aging marks
+  ctx.fillStyle = 'rgba(0,0,0,0.06)';
+  ctx.fillRect(x - w / 2 + 2, y + h * 0.3, w * 0.4, h * 0.15);
+}
+
+function drawCar(x, y, w, h, color, isPlayer) {
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.beginPath();
+  ctx.ellipse(x + 2, y + 3, w * 0.55, h * 0.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Body
+  ctx.fillStyle = color;
+  const r = 6;
+  ctx.beginPath();
+  ctx.moveTo(x - w / 2 + r, y - h / 2);
+  ctx.lineTo(x + w / 2 - r, y - h / 2);
+  ctx.quadraticCurveTo(x + w / 2, y - h / 2, x + w / 2, y - h / 2 + r);
+  ctx.lineTo(x + w / 2, y + h / 2 - r);
+  ctx.quadraticCurveTo(x + w / 2, y + h / 2, x + w / 2 - r, y + h / 2);
+  ctx.lineTo(x - w / 2 + r, y + h / 2);
+  ctx.quadraticCurveTo(x - w / 2, y + h / 2, x - w / 2, y + h / 2 - r);
+  ctx.lineTo(x - w / 2, y - h / 2 + r);
+  ctx.quadraticCurveTo(x - w / 2, y - h / 2, x - w / 2 + r, y - h / 2);
+  ctx.closePath();
+  ctx.fill();
+
+  // Windshield
+  ctx.fillStyle = isPlayer ? 'rgba(100,200,255,0.7)' : 'rgba(80,80,80,0.6)';
+  const wsY = isPlayer ? y - h * 0.32 : y + h * 0.15;
+  const wsH = h * 0.22;
+  ctx.fillRect(x - w * 0.35, wsY, w * 0.7, wsH);
+
+  // Rear window
+  const rwY = isPlayer ? y + h * 0.2 : y - h * 0.38;
+  ctx.fillRect(x - w * 0.3, rwY, w * 0.6, h * 0.15);
+
+  if (isPlayer) {
+    // Headlights
+    ctx.fillStyle = '#ffee88';
+    ctx.beginPath();
+    ctx.arc(x - w * 0.32, y - h / 2 + 4, 3, 0, Math.PI * 2);
+    ctx.arc(x + w * 0.32, y - h / 2 + 4, 3, 0, Math.PI * 2);
+    ctx.fill();
+    // Tail lights
+    ctx.fillStyle = '#ff3333';
+    ctx.fillRect(x - w * 0.38, y + h / 2 - 5, 5, 4);
+    ctx.fillRect(x + w * 0.38 - 5, y + h / 2 - 5, 5, 4);
+  }
+
+  // Side details
+  ctx.strokeStyle = 'rgba(0,0,0,0.2)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x - w / 2 + 1, y - h * 0.1, w - 2, h * 0.2);
+}
+
+function drawBus(x, y, w, h) {
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.beginPath();
+  ctx.ellipse(x + 2, y + 3, w * 0.55, h * 0.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Body
+  ctx.fillStyle = '#2e7d32';
+  const r = 5;
+  ctx.beginPath();
+  ctx.moveTo(x - w / 2 + r, y - h / 2);
+  ctx.lineTo(x + w / 2 - r, y - h / 2);
+  ctx.quadraticCurveTo(x + w / 2, y - h / 2, x + w / 2, y - h / 2 + r);
+  ctx.lineTo(x + w / 2, y + h / 2 - r);
+  ctx.quadraticCurveTo(x + w / 2, y + h / 2, x + w / 2 - r, y + h / 2);
+  ctx.lineTo(x - w / 2 + r, y + h / 2);
+  ctx.quadraticCurveTo(x - w / 2, y + h / 2, x - w / 2, y + h / 2 - r);
+  ctx.lineTo(x - w / 2, y - h / 2 + r);
+  ctx.quadraticCurveTo(x - w / 2, y - h / 2, x - w / 2 + r, y - h / 2);
+  ctx.closePath();
+  ctx.fill();
+
+  // Stripe
+  ctx.fillStyle = '#81c784';
+  ctx.fillRect(x - w / 2, y - 4, w, 8);
+
+  // Windows
+  ctx.fillStyle = 'rgba(150,220,255,0.6)';
+  for (let wy = y - h * 0.35; wy < y + h * 0.35; wy += 14) {
+    ctx.fillRect(x - w * 0.4, wy, w * 0.8, 8);
+  }
+
+  // Front
+  ctx.fillStyle = '#1b5e20';
+  ctx.fillRect(x - w * 0.4, y - h / 2 + 2, w * 0.8, 10);
+}
+
+function drawCone(x, y) {
+  // Base
+  ctx.fillStyle = '#ff6600';
+  ctx.beginPath();
+  ctx.moveTo(x, y - 10);
+  ctx.lineTo(x + 9, y + 8);
+  ctx.lineTo(x - 9, y + 8);
+  ctx.closePath();
+  ctx.fill();
+  // Stripe
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(x - 5, y - 1, 10, 3);
+}
+
+function drawWoltRider(x, y) {
+  // Scooter body
+  ctx.fillStyle = '#333';
+  ctx.fillRect(x - 5, y - 14, 10, 28);
+  // Rider
+  ctx.fillStyle = '#00ccbc';
+  ctx.beginPath();
+  ctx.arc(x, y - 8, 7, 0, Math.PI * 2);
+  ctx.fill();
+  // Delivery bag
+  ctx.fillStyle = '#00ccbc';
+  ctx.fillRect(x - 8, y + 2, 16, 12);
+  // Wolt "W"
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 8px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('W', x, y + 12);
+  // Wheels
+  ctx.fillStyle = '#555';
+  ctx.beginPath();
+  ctx.arc(x, y - 16, 3, 0, Math.PI * 2);
+  ctx.arc(x, y + 16, 3, 0, Math.PI * 2);
+  ctx.fill();
+  // Glow effect
+  ctx.strokeStyle = 'rgba(0,204,188,0.4)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(x, y, 22, 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+function drawParkedCars() {
+  if (stage < 4) return;
+
+  // Draw curb stripes and parked cars from unified curb segments
+  for (const seg of curbSegments) {
+    if (seg.y + seg.h < -20 || seg.y > H + 20) continue;
+    const cx = seg.side === 'left' ? ROAD_LEFT - 5 : ROAD_LEFT + ROAD_W + 1;
+    const cw = 4;
+    const stripeH = 8;
+    const color1 = seg.curb === 'red' ? '#cc3333' : '#3366cc';
+    for (let sy = seg.y; sy < seg.y + seg.h; sy += stripeH * 2) {
+      if (sy > H + 10 || sy + stripeH < -10) continue;
+      ctx.fillStyle = color1;
+      ctx.fillRect(cx, sy, cw, stripeH);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(cx, sy + stripeH, cw, stripeH);
+    }
+    // Handicap symbol on the road surface
+    if (seg.curb === 'handicap') {
+      const symX = seg.side === 'left' ? ROAD_LEFT + 18 : ROAD_LEFT + ROAD_W - 18;
+      const symY = seg.y + seg.h / 2;
+      if (symY > -20 && symY < H + 20) {
+        ctx.fillStyle = '#2255aa';
+        ctx.fillRect(symX - 12, symY - 12, 24, 24);
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 16px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('\u267F', symX, symY);
+        ctx.textBaseline = 'alphabetic';
+      }
+    }
+    // Draw parked car if segment has one (skip if overlapping active parking spot)
+    if (!seg.empty && seg.carColor) {
+      const carY = seg.y + seg.h / 2;
+      let skipForParking = false;
+      if (parkingSpot && seg.side === parkingSpot.side) {
+        if (Math.abs(carY - parkingSpot.y) < 50) skipForParking = true;
+      }
+      if (!skipForParking && carY > -80 && carY < H + 80) {
+        const baseX = seg.side === 'left'
+          ? ROAD_LEFT + 18
+          : ROAD_LEFT + ROAD_W - 18;
+        drawCar(baseX, carY, 26, 50, seg.carColor, false);
+      }
+    }
+  }
+}
+
+function drawObstacles() {
+  for (const ob of obstacles) {
+    if (ob.y < -120 || ob.y > H + 120) continue;
+    switch (ob.type) {
+      case 'car':
+        drawCar(ob.x, ob.y, ob.w, ob.h, ob.color, false);
+        break;
+      case 'bus':
+        drawBus(ob.x, ob.y, ob.w, ob.h);
+        break;
+      case 'cone':
+        drawCone(ob.x, ob.y);
+        break;
+      case 'wolt':
+        drawWoltRider(ob.x, ob.y);
+        break;
+    }
+  }
+}
+
+function drawPlayer() {
+  drawCar(player.x, player.y, player.w, player.h, '#e0e0e0', true);
+}
+
+function drawFineTexts() {
+  for (const ft of fineTexts) {
+    ctx.globalAlpha = Math.min(1, ft.alpha);
+    ctx.fillStyle = ft.color || '#ff4444';
+    ctx.font = ft.big ? 'bold 18px sans-serif' : 'bold 22px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(ft.text, ft.x, ft.y);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawExplosion() {
+  for (const p of explosionParticles) {
+    ctx.globalAlpha = Math.max(0, p.life / p.maxLife);
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function updateExplosion(dt) {
+  for (let i = explosionParticles.length - 1; i >= 0; i--) {
+    const p = explosionParticles[i];
+    p.x += p.vx * 60 * dt;
+    p.y += p.vy * 60 * dt;
+    p.life -= dt;
+    if (p.life <= 0) explosionParticles.splice(i, 1);
+  }
+}
+
+// ─── HUD ─────────────────────────────────────────────────────────────
+function drawHUD() {
+  const pad = 16;
+
+  // Speed (top-left)
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  roundRect(pad - 4, pad - 4, 100, 40, 8);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = '13px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText('SPEED', pad + 4, pad + 12);
+  ctx.font = 'bold 18px sans-serif';
+  ctx.fillText(`${Math.floor(speed * 20)} km/h`, pad + 4, pad + 32);
+
+  // Score (top-center)
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  const scoreTxt = `${score}m`;
+  ctx.font = 'bold 20px sans-serif';
+  ctx.textAlign = 'center';
+  const sw = ctx.measureText(scoreTxt).width;
+  roundRect(W / 2 - sw / 2 - 16, pad - 4, sw + 32, 40, 8);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = '13px sans-serif';
+  ctx.fillText('DISTANCE', W / 2, pad + 12);
+  ctx.font = 'bold 20px sans-serif';
+  ctx.fillText(scoreTxt, W / 2, pad + 32);
+
+  // Stage indicator (below distance)
+  if (stage >= 2) {
+    ctx.fillStyle = stage === 4 ? 'rgba(200,0,0,0.6)' : stage >= 3 ? 'rgba(180,100,0,0.6)' : 'rgba(0,150,100,0.5)';
+    const stageLabel = stage === 4 ? 'FINAL BOSS — FIND PARKING'
+      : stage === 3 ? 'STAGE 3 — CONSTRUCTION' : 'STAGE 2 — BEWARE OF THE WOLTERS!';
+    ctx.font = 'bold 12px sans-serif';
+    ctx.textAlign = 'center';
+    const stw = ctx.measureText(stageLabel).width;
+    roundRect(W / 2 - stw / 2 - 10, pad + 40, stw + 20, 22, 6);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 12px sans-serif';
+    ctx.fillText(stageLabel, W / 2, pad + 55);
+  }
+
+  if (stage === 4 && !parkingSpot) {
+    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+    ctx.font = '14px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Looking for parking...', W / 2, H * 0.5);
+  }
+
+  // Fines (top-right)
+  ctx.fillStyle = fines > 0 ? 'rgba(180,0,0,0.6)' : 'rgba(0,0,0,0.5)';
+  roundRect(W - pad - 100, pad - 4, 100, 40, 8);
+  ctx.fill();
+  ctx.fillStyle = fines > 0 ? '#ff8888' : '#aaa';
+  ctx.font = '13px sans-serif';
+  ctx.textAlign = 'right';
+  ctx.fillText('FINES', W - pad - 4, pad + 12);
+  ctx.font = 'bold 18px sans-serif';
+  ctx.fillStyle = fines > 0 ? '#ff6666' : '#888';
+  ctx.fillText(`₪${fines}`, W - pad - 4, pad + 32);
+}
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+// ─── Screens ─────────────────────────────────────────────────────────
+function drawStartScreen() {
+  // Background road preview
+  drawRoad();
+  drawDecorations();
+
+  // Overlay
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillRect(0, 0, W, H);
+
+  // Title
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 42px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('NATATZI', W / 2, H * 0.28);
+
+  // Credit — right below title
+  ctx.fillStyle = '#999';
+  ctx.font = '14px sans-serif';
+  ctx.fillText('by Tom Rabinowitz', W / 2, H * 0.33);
+
+  // Subtitle
+  ctx.fillStyle = '#ccc';
+  ctx.font = '16px sans-serif';
+  ctx.fillText('The Tel Aviv Driving Experience', W / 2, H * 0.39);
+
+  // Car preview
+  drawCar(W / 2, H * 0.50, 36, 62, '#e0e0e0', true);
+
+  // Prompt
+  startPulse += 0.03;
+  ctx.globalAlpha = 0.5 + Math.sin(startPulse) * 0.4;
+  ctx.fillStyle = '#fff';
+  ctx.font = '18px sans-serif';
+  ctx.fillText('Tap or Press Any Key to Start', W / 2, H * 0.67);
+  ctx.globalAlpha = 1;
+
+  // Controls info
+  ctx.fillStyle = '#999';
+  ctx.font = '13px sans-serif';
+  ctx.fillText('← → Switch lanes  ↑ ↓ Speed up / Brake', W / 2, H * 0.76);
+}
+
+function drawGameOverScreen(dt) {
+  gameOverAlpha = Math.min(1, gameOverAlpha + dt * 2);
+
+  ctx.fillStyle = `rgba(0,0,0,${gameOverAlpha * 0.7})`;
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.globalAlpha = gameOverAlpha;
+  ctx.textAlign = 'center';
+
+  const perfectRun = parkingWin && fines === 0 && woltsHit === 0 && !parkingViolation;
+  let ly = H * 0.18; // running y position
+
+  if (perfectRun) {
+    // PERFECT WIN
+    ctx.fillStyle = '#4CAF50';
+    ctx.font = 'bold 40px sans-serif';
+    ctx.fillText('PERFECT PARKING!', W / 2, ly);
+    ly += 40;
+    ctx.fillStyle = '#fff';
+    ctx.font = '18px sans-serif';
+    ctx.fillText('Zero fines. Zero casualties. Found parking.', W / 2, ly);
+    ly += 28;
+    ctx.fillText('You beat Tel Aviv. Respect.', W / 2, ly);
+    ly += 45;
+  } else if (parkingWin && parkingViolation === 'towed') {
+    // Parked on red-white — towed!
+    ctx.fillStyle = '#ff4444';
+    ctx.font = 'bold 34px sans-serif';
+    ctx.fillText('TOWED!', W / 2, ly);
+    ly += 35;
+    ctx.fillStyle = '#ff8888';
+    ctx.font = '16px sans-serif';
+    ctx.fillText('You parked on red-white. Your car was towed.', W / 2, ly);
+    ly += 24;
+    ctx.fillText('₪1,000 fine. Classic Tel Aviv.', W / 2, ly);
+    ly += 40;
+  } else if (parkingWin && parkingViolation === 'handicap') {
+    // Parked on handicap
+    ctx.fillStyle = '#ffaa00';
+    ctx.font = 'bold 34px sans-serif';
+    ctx.fillText('PARKED! ...on handicap', W / 2, ly);
+    ly += 35;
+    ctx.fillStyle = '#ffcc66';
+    ctx.font = '16px sans-serif';
+    ctx.fillText('₪1,000 fine. You should be ashamed.', W / 2, ly);
+    ly += 40;
+  } else if (parkingWin) {
+    // Parked legally but not perfect
+    ctx.fillStyle = '#8BC34A';
+    ctx.font = 'bold 36px sans-serif';
+    ctx.fillText('PARKED!', W / 2, ly);
+    ly += 35;
+    ctx.fillStyle = '#ccc';
+    ctx.font = '16px sans-serif';
+    ctx.fillText('You found parking. But at what cost?', W / 2, ly);
+    ly += 40;
+  } else {
+    // Crashed
+    ctx.fillStyle = '#ff4444';
+    ctx.font = 'bold 38px sans-serif';
+    ctx.fillText('GAME OVER', W / 2, ly);
+    ly += 35;
+    ctx.fillStyle = '#999';
+    ctx.font = '14px sans-serif';
+    ctx.fillText(`Made it to Stage ${stage}`, W / 2, ly);
+    ly += 35;
+  }
+
+  // Stats
+  ctx.fillStyle = '#fff';
+  ctx.font = '18px sans-serif';
+  ctx.fillText(`Distance: ${score}m`, W / 2, ly);
+  ly += 30;
+
+  // Record / shame section
+  if (fines > 0) {
+    ctx.fillStyle = '#ff8888';
+    ctx.font = '16px sans-serif';
+    ctx.fillText(`Tel Aviv is ₪${fines} richer!`, W / 2, ly);
+    ly += 25;
+  } else {
+    ctx.fillStyle = '#88ff88';
+    ctx.font = '15px sans-serif';
+    ctx.fillText('No fines — clean driving!', W / 2, ly);
+    ly += 25;
+  }
+
+  if (woltsHit > 0) {
+    ctx.fillStyle = '#00ccbc';
+    ctx.font = '16px sans-serif';
+    ctx.fillText(`Wolt riders hit: ${woltsHit} 💙`, W / 2, ly);
+    ly += 22;
+    ctx.font = '13px sans-serif';
+    ctx.fillStyle = '#88dddd';
+    ctx.fillText(`${woltsHit} ${woltsHit === 1 ? 'person' : 'people'} stayed hungry tonight :(`, W / 2, ly);
+    ly += 30;
+  } else if (stage >= 2) {
+    ctx.fillStyle = '#88ff88';
+    ctx.font = '15px sans-serif';
+    ctx.fillText('No Wolt riders harmed!', W / 2, ly);
+    ly += 28;
+  }
+
+  // Play again button
+  ly += 10;
+  const btnW = 180, btnH = 46;
+  const btnX = W / 2 - btnW / 2;
+  const btnY = ly;
+  ctx.fillStyle = '#4CAF50';
+  roundRect(btnX, btnY, btnW, btnH, 10);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 18px sans-serif';
+  ctx.fillText('Play Again', W / 2, ly + btnH / 2 + 6);
+  ly += btnH + 18;
+
+  // Copy to share button
+  const copyBtnW = 180, copyBtnH = 36;
+  const copyBtnX = W / 2 - copyBtnW / 2;
+  const copyBtnY = ly;
+  const wasCopied = shareButtons.length > 0 && shareButtons[0].copied;
+  ctx.fillStyle = wasCopied ? '#666' : '#555';
+  roundRect(copyBtnX, copyBtnY, copyBtnW, copyBtnH, 8);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 14px sans-serif';
+  ctx.fillText(wasCopied ? 'Copied! Now share it!' : 'Share your score!', W / 2, ly + copyBtnH / 2 + 5);
+  shareButtons.length = 0;
+  shareButtons.push({ x: copyBtnX, y: copyBtnY, w: copyBtnW, h: copyBtnH, type: 'Copy', copied: wasCopied });
+
+  // Show copied text
+  if (wasCopied) {
+    ly += copyBtnH + 24;
+    ctx.fillStyle = '#888';
+    ctx.font = '11px sans-serif';
+    const lines = getShareText().split('\n');
+    for (const line of lines) {
+      ctx.fillText(line, W / 2, ly);
+      ly += 14;
+    }
+  }
+
+  ctx.globalAlpha = 1;
+}
+
+// ─── Main Loop ───────────────────────────────────────────────────────
+function loop(time) {
+  requestAnimationFrame(loop);
+
+  const dt = Math.min(0.05, (time - lastTime) / 1000);
+  lastTime = time;
+
+  try {
+    // Update
+    update(dt);
+    updateExplosion(dt);
+
+    // Draw
+    ctx.save();
+    ctx.translate(shakeX, shakeY);
+
+    if (state === 'start') {
+      drawStartScreen();
+    } else {
+      drawRoad();
+      drawDecorations();
+      drawParkedCars();
+      drawObstacles();
+      if (state === 'playing') drawPlayer();
+      if (state === 'gameover') {
+        drawPlayer();
+        drawExplosion();
+      }
+      drawFineTexts();
+      drawHUD();
+      if (state === 'gameover') drawGameOverScreen(dt);
+    }
+
+    ctx.restore();
+  } catch (e) {
+    console.error('Game error:', e, e.stack);
+    ctx.restore();
+    // Show error on screen
+    ctx.fillStyle = 'red';
+    ctx.font = 'bold 16px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText('ERROR: ' + e.message, 10, H - 60);
+    ctx.font = '12px monospace';
+    const stack = (e.stack || '').split('\n').slice(0, 3);
+    for (let i = 0; i < stack.length; i++) {
+      ctx.fillText(stack[i].trim().substring(0, 60), 10, H - 40 + i * 16);
+    }
+  }
+}
+
+// Start the loop
+lastTime = performance.now();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
