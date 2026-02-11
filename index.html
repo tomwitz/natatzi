@@ -916,7 +916,7 @@ function update(dt) {
       if (Math.abs(ob.x - player.x) < lw * 0.5) {
         const minGap = (player.h + ob.h) * 0.5 + 25;
         // Push obstacle ahead only when NOT accelerating (player can crash by speeding up)
-        if (!holdingSpeedUp && ob.y > player.y - minGap && ob.y < player.y) {
+        if (speedBoost <= 0 && ob.y > player.y - minGap && ob.y < player.y) {
           ob.y = player.y - minGap;
         }
         // ALWAYS push obstacle behind player further behind (can't be rear-ended)
