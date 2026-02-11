@@ -1040,7 +1040,12 @@ function getShareText() {
 function handleShare(type, cx, cy) {
   for (const btn of shareButtons) {
     if (cx >= btn.x && cx <= btn.x + btn.w && cy >= btn.y && cy <= btn.y + btn.h) {
-      navigator.clipboard.writeText(getShareText()).catch(() => {});
+      const text = getShareText();
+      if (navigator.share) {
+        navigator.share({ text }).catch(() => {});
+      } else {
+        navigator.clipboard.writeText(text).catch(() => {});
+      }
       btn.copied = true;
       setTimeout(() => { btn.copied = false; }, 4000);
       return true;
