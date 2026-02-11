@@ -1037,10 +1037,26 @@ function getShareText() {
   return text;
 }
 
+function fallbackCopy(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.left = '-9999px';
+  document.body.appendChild(ta);
+  ta.select();
+  document.execCommand('copy');
+  document.body.removeChild(ta);
+}
+
 function handleShare(type, cx, cy) {
   for (const btn of shareButtons) {
     if (cx >= btn.x && cx <= btn.x + btn.w && cy >= btn.y && cy <= btn.y + btn.h) {
-      navigator.clipboard.writeText(getShareText()).catch(() => {});
+      const text = getShareText();
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).catch(() => { fallbackCopy(text); });
+      } else {
+        fallbackCopy(text);
+      }
       btn.copied = true;
       setTimeout(() => { btn.copied = false; }, 4000);
       return true;
