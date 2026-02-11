@@ -257,7 +257,7 @@ canvas.addEventListener('touchstart', e => {
   touchStartX = t.clientX;
   touchStartY = t.clientY;
   if (state === 'start') startGame();
-  if (state === 'gameover') {
+  if (state === 'gameover' && gameOverAlpha >= 1) {
     const rect = canvas.getBoundingClientRect();
     const cx = (t.clientX - rect.left) * (W / rect.width);
     const cy = (t.clientY - rect.top) * (H / rect.height);
@@ -294,7 +294,7 @@ canvas.addEventListener('touchend', e => {
 
 canvas.addEventListener('mousedown', e => {
   if (state === 'start') startGame();
-  if (state === 'gameover') {
+  if (state === 'gameover' && gameOverAlpha >= 1) {
     const rect = canvas.getBoundingClientRect();
     const cx = (e.clientX - rect.left) * (W / rect.width);
     const cy = (e.clientY - rect.top) * (H / rect.height);
@@ -1037,33 +1037,10 @@ function getShareText() {
   return text;
 }
 
-function shareOrCopy(text) {
-  // Mobile: use native share sheet if available
-  if (navigator.share) {
-    navigator.share({ text }).catch(() => {});
-    return;
-  }
-  // Desktop / fallback: clipboard
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text).catch(() => {});
-    return;
-  }
-  // Last resort: textarea hack (iOS Safari)
-  const ta = document.createElement('textarea');
-  ta.value = text;
-  ta.style.position = 'fixed';
-  ta.style.opacity = '0';
-  document.body.appendChild(ta);
-  ta.focus();
-  ta.setSelectionRange(0, ta.value.length);
-  document.execCommand('copy');
-  document.body.removeChild(ta);
-}
-
 function handleShare(type, cx, cy) {
   for (const btn of shareButtons) {
     if (cx >= btn.x && cx <= btn.x + btn.w && cy >= btn.y && cy <= btn.y + btn.h) {
-      shareOrCopy(getShareText());
+      navigator.clipboard.writeText(getShareText()).catch(() => {});
       btn.copied = true;
       setTimeout(() => { btn.copied = false; }, 4000);
       return true;
