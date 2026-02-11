@@ -1004,10 +1004,14 @@ function update(dt) {
   }
 
   // ── Screen shake ──
+  const onConstruction = constructionLane >= 0 && player.targetLane === constructionLane;
   if (shakeDur > 0) {
     shakeDur -= dt;
     shakeX = rand(-3, 3);
     shakeY = rand(-3, 3);
+  } else if (onConstruction) {
+    shakeX = rand(-1.5, 1.5);
+    shakeY = rand(-1.5, 1.5);
   } else {
     shakeX = shakeY = 0;
   }
