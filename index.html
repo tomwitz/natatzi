@@ -1757,29 +1757,30 @@ function drawGameOverScreen(dt) {
   ctx.fillText('Play Again', W / 2, ly + btnH / 2 + 6);
   ly += btnH + 18;
 
-  // Copy to share button
-  const copyBtnW = 180, copyBtnH = 36;
-  const copyBtnX = W / 2 - copyBtnW / 2;
-  const copyBtnY = ly;
+  // Copy to share button — only on parking win
   const wasCopied = shareButtons.length > 0 && shareButtons[0].copied;
-  ctx.fillStyle = wasCopied ? '#666' : '#555';
-  roundRect(copyBtnX, copyBtnY, copyBtnW, copyBtnH, 8);
-  ctx.fill();
-  ctx.fillStyle = '#fff';
-  ctx.font = 'bold 14px sans-serif';
-  ctx.fillText(wasCopied ? 'Copied! Now share it!' : 'Share your score!', W / 2, ly + copyBtnH / 2 + 5);
   shareButtons.length = 0;
-  shareButtons.push({ x: copyBtnX, y: copyBtnY, w: copyBtnW, h: copyBtnH, type: 'Copy', copied: wasCopied });
+  if (parkingWin) {
+    const copyBtnW = 180, copyBtnH = 36;
+    const copyBtnX = W / 2 - copyBtnW / 2;
+    const copyBtnY = ly;
+    ctx.fillStyle = wasCopied ? '#666' : '#555';
+    roundRect(copyBtnX, copyBtnY, copyBtnW, copyBtnH, 8);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 14px sans-serif';
+    ctx.fillText(wasCopied ? 'Copied! Now share it!' : 'Share your score!', W / 2, ly + copyBtnH / 2 + 5);
+    shareButtons.push({ x: copyBtnX, y: copyBtnY, w: copyBtnW, h: copyBtnH, type: 'Copy', copied: wasCopied });
 
-  // Show copied text
-  if (wasCopied) {
-    ly += copyBtnH + 24;
-    ctx.fillStyle = '#888';
-    ctx.font = '11px sans-serif';
-    const lines = getShareText().split('\n');
-    for (const line of lines) {
-      ctx.fillText(line, W / 2, ly);
-      ly += 14;
+    if (wasCopied) {
+      ly += copyBtnH + 24;
+      ctx.fillStyle = '#888';
+      ctx.font = '11px sans-serif';
+      const lines = getShareText().split('\n');
+      for (const line of lines) {
+        ctx.fillText(line, W / 2, ly);
+        ly += 14;
+      }
     }
   }
 
